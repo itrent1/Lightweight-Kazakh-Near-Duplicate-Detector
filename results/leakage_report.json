@@ -1,0 +1,13 @@
+{
+  "train_rows": 145152,
+  "test_rows": 41480,
+  "test_rows_identical_text_in_train": 24,
+  "test_rows_near_duplicate_in_train": 168,
+  "test_rows_with_any_text_overlap": 192,
+  "shared_original_documents": 0,
+  "test_rows_whose_original_is_in_train": 0,
+  "near_duplicate_threshold": 0.8,
+  "test_rows_pct": 100.0,
+  "test_rows_identical_text_in_train_pct": 0.06,
+  "test_rows_near_duplicate_in_train_pct": 0.41
+}
