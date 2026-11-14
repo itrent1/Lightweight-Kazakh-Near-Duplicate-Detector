@@ -60,6 +60,31 @@ A residual check on this split (`results/leakage_report.json`) found 24 test row
 
 Duplicate-type classification uses the validation split. Plain method rows use logistic regression (embedding methods: `|u−v|`, `u⊙v` and cosine; baselines: the similarity score alone). A majority-class classifier is the simplest baseline.
 
+## Results (v2, current code)
+
+Same test split and retrieval setup as v1. Rows marked `+lex` add lexical features with gradient boosting; their retrieval is the base method's, so Recall is shown only for base rows.
+
+| Method | Macro-F1 | Accuracy | Spearman | Recall@10 | Sec / 1000 pairs | Size (MB) |
+|---|---|---|---|---|---|---|
+| majority baseline | 0.063 | 0.280 | – | – | 0.0 | – |
+| TF-IDF cosine | 0.366 | 0.404 | 0.496 | 0.999 | 20.5 | 16.8 |
+| TF-IDF cosine + lex | 0.883 | 0.925 | 0.945 | – | 21.2 | 16.8 |
+| MinHash LSH | 0.387 | 0.428 | 0.320 | 0.854 | 4.8 | – |
+| MinHash LSH + lex | 0.881 | 0.924 | 0.946 | – | 5.5 | – |
+| e5-small zero-shot | 0.499 | 0.542 | 0.380 | 0.994 | 12.4 | 470.6 |
+| e5-small zero-shot + lex | 0.883 | 0.925 | 0.945 | – | 13.1 | 470.6 |
+| e5-small fine-tuned (v2) | 0.585 | 0.611 | 0.320 | **0.997** | 12.0 | 470.6 |
+| **e5-small fine-tuned (v2) + lex** | **0.888** | **0.928** | 0.945 | – | 12.7 | 470.6 |
+| lexical features only | 0.881 | 0.924 | **0.946** | – | **0.7** | – |
+
+What v2 changed:
+- Recall@10 of the fine-tuned model is back to 0.997 (v1: 0.755). Partial variants are retrievable again, so the v2 fix addressed the retrieval drop.
+- But the regression objective got weaker: Spearman fell from 0.440 (v1) to 0.320, and plain macro-F1 from 0.611 to 0.585. Partial pairs now score 0.38 accuracy as a type, so the fine-tuned score is not a good similarity signal on its own.
+
+The main finding of v2 is that lexical features alone reach macro-F1 0.881 and Spearman 0.946 at 0.7 seconds per 1000 pairs. The embedding adds only +0.007 F1 on top (0.888 vs 0.881) at about 18 times the cost. On this dataset, duplicate type and similarity follow from how the text was edited, which word and n-gram overlap measure directly. This is a property of the dataset construction, and it means the lexical baseline is strong evidence for what the labels encode.
+
+Length effect (SQL query Q9, hybrid model): accuracy rises with document length, from 0.82 for under 100 tokens to 0.98 for 600+. This is the reverse of v1, where the plain model was worse on long documents, so the lexical features are doing the work on long texts.
+
 ## Results (v1, produced before the fixes described below)
 
 Test split: 41,480 pairs (similarity and type). Retrieval: 5,000 random test queries against the non-exact variants of the test documents. A query is relevant to every variant of the same original document.
@@ -89,7 +114,7 @@ Observations:
 
 ## Why v1 behaved this way, and what v2 changes
 
-These causes come from the saved v1 predictions and from the text pairs. The v2 code has been written but **not run yet**, so its effect is unmeasured.
+These causes come from the saved v1 predictions and from the text pairs. The v2 fixes were run and measured; their effect is in the v2 results above.
 
 1. **The duplicate type is defined by how the text was edited, not by meaning.** Word overlap between a document and its variant, by subtype (400 test pairs each):
 
@@ -117,7 +142,7 @@ Changes in v2:
 - `src/evaluate.py`: each method also gets a `+lex` hybrid (gradient boosting classifier and regressor), plus a lexical-only reference row.
 - `main.py`: the interactive prediction and the SQL report use the fine-tuned hybrid `e5_finetuned+lex`.
 
-Open risks of v2: training at 512 tokens may need a smaller batch if the GPU runs out of memory (edit `TRAIN_BATCH_SIZE`), and it will take longer than the 33 minutes of v1. 512 tokens cover about 246 words, so 35.1% of documents are still truncated; the lexical features, computed on the full text, cover that gap for classification.
+v2 training took 46 minutes on the RTX 3070 with 512 tokens and batch 16 (7,500 steps, round-robin over the two objectives). 512 tokens cover about 246 words, so 35.1% of documents are still truncated; the lexical features, computed on the full text, cover that gap, and the results above show they do.
 
 ## Database
 
