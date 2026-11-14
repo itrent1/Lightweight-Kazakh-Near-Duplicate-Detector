@@ -120,7 +120,7 @@ def save_experiment(conn: sqlite3.Connection, metrics: dict, predictions: pd.Dat
     return exp_id
 
 
-def run_query(conn: sqlite3.Connection, name: str, method: str = config.FINETUNED_METHOD) -> pd.DataFrame:
+def run_query(conn: sqlite3.Connection, name: str, method: str = config.HYBRID_METHOD) -> pd.DataFrame:
     """Execute a named report query and return the result as a DataFrame."""
     if name not in QUERIES:
         raise KeyError(f"Unknown query '{name}'. Available: {', '.join(QUERIES)}")

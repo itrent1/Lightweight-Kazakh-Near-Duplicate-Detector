@@ -1,4 +1,10 @@
-"""Benchmark: TF-IDF, MinHash, zero-shot e5-small and fine-tuned e5-small on the test split."""
+"""Benchmark: TF-IDF, MinHash, zero-shot e5-small and fine-tuned e5-small on the test split.
+
+Every method is reported twice: with its own features only (logistic regression on its score or
+embedding features) and as a hybrid '+lex' variant that adds lexical features (length ratio,
+containment, n-gram overlap, common prefix/suffix) and uses gradient boosting. A lexical-only row
+shows what those features give without any model.
+"""
 from __future__ import annotations
 
 import json
@@ -13,6 +19,7 @@ import pandas as pd
 import psutil
 from scipy.stats import spearmanr
 from sklearn.dummy import DummyClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.pipeline import make_pipeline
@@ -28,6 +35,7 @@ from .baseline import (
     sparse_topk,
 )
 from .data import load_split
+from .lexical import lexical_features
 from .model import embed, faiss_topk, load_encoder, model_size_mb, pair_features
 
 FINETUNED = config.FINETUNED_METHOD
@@ -172,6 +180,56 @@ def score_output(out: MethodOutput, clf_labels: np.ndarray, test: pd.DataFrame, 
     return metrics, preds, clf
 
 
+def score_hybrid(name: str, out: MethodOutput | None, lex_fit: np.ndarray, lex_test: np.ndarray,
+                 lex_fit_seconds: float, lex_test_seconds: float,
+                 validation: pd.DataFrame, test: pd.DataFrame):
+    """Gradient boosting on [method score, lexical features]; out=None gives the lexical-only variant.
+
+    The method score is the last feature column of every method (the only column for TF-IDF and
+    MinHash, the cosine for the encoders), so the 768 embedding dimensions are not repeated here.
+    The regressor predicts similarity_score and supplies the Spearman of the hybrid.
+    """
+    if out is None:
+        X_fit, X_test = lex_fit, lex_test
+        base_fit_s = base_infer_s = 0.0
+        size = None
+    else:
+        X_fit = np.hstack([out.X_clf_fit[:, -1:], lex_fit])
+        X_test = np.hstack([out.X_clf_test[:, -1:], lex_test])
+        base_fit_s, base_infer_s, size = out.fit_seconds, out.infer_seconds, out.model_size_mb
+
+    clf = HistGradientBoostingClassifier(
+        max_iter=300, learning_rate=0.1, class_weight="balanced", random_state=config.RANDOM_STATE
+    )
+    reg = HistGradientBoostingRegressor(max_iter=300, learning_rate=0.1, random_state=config.RANDOM_STATE)
+
+    def _fit():
+        clf.fit(X_fit, validation["type_duplicate"].values)
+        reg.fit(X_fit, validation["similarity_score"].values)
+
+    _, fit_s = _timed(_fit)
+    (types, scores), predict_s = _timed(lambda: (clf.predict(X_test), reg.predict(X_test)))
+
+    y = test["type_duplicate"].values
+    infer_s = base_infer_s + lex_test_seconds + predict_s
+    metrics = {
+        "method": name,
+        "n_test_pairs": int(len(test)),
+        "spearman": float(spearmanr(scores, test["similarity_score"]).correlation),
+        "f1_macro": float(f1_score(y, types, average="macro")),
+        "accuracy": float(accuracy_score(y, types)),
+        "recall_at_1": None, "recall_at_5": None, "recall_at_10": None,  # retrieval is unchanged, see base row
+        "hit_at_1": None, "hit_at_5": None, "hit_at_10": None,
+        "fit_seconds": round(base_fit_s + lex_fit_seconds + fit_s, 2),
+        "infer_seconds": round(infer_s, 2),
+        "infer_seconds_per_1000": round(infer_s / len(test) * 1000, 3),
+        "model_size_mb": None if size is None else round(size, 2),
+        "rss_mb": round(psutil.Process().memory_info().rss / 1e6, 1),
+    }
+    preds = pd.DataFrame({"pair_id": test["id"].values, "pred_score": scores, "pred_type": types})
+    return metrics, preds, clf, reg
+
+
 def majority_baseline(clf_labels: np.ndarray, test: pd.DataFrame):
     dummy = DummyClassifier(strategy="most_frequent").fit(np.zeros((len(clf_labels), 1)), clf_labels)
     types = dummy.predict(np.zeros((len(test), 1)))
@@ -217,22 +275,49 @@ def run_benchmark(include_finetuned: bool = True, log=print) -> dict:
         runs.append((FINETUNED, lambda: run_encoder(FINETUNED, config.FINETUNED_MODEL_DIR, validation, test,
                                                     query_idx, corpus_mask)))
 
+    log("-> lexical features (validation and test)")
+    lex_fit, lex_fit_s = _timed(
+        lambda: lexical_features(validation["content"].tolist(), validation["modified_content"].tolist())
+    )
+    lex_test, lex_test_s = _timed(
+        lambda: lexical_features(test["content"].tolist(), test["modified_content"].tolist())
+    )
+
     results, predictions = [], {}
+
+    def _add(metrics: dict, preds: pd.DataFrame) -> None:
+        results.append(metrics)
+        predictions[metrics["method"]] = preds
+        spearman = metrics["spearman"]
+        log(f"   {metrics['method']}: f1_macro={metrics['f1_macro']:.4f} "
+            f"spearman={'n/a' if spearman is None else format(spearman, '.4f')} "
+            f"recall@10={'n/a' if metrics['recall_at_10'] is None else format(metrics['recall_at_10'], '.4f')}")
+
     metrics, preds = majority_baseline(clf_labels, test)
-    results.append(metrics)
-    predictions[metrics["method"]] = preds
+    _add(metrics, preds)
 
     for name, runner in runs:
         log(f"-> {name}")
         out = runner()
         metrics, preds, clf = score_output(out, clf_labels, test, relevant)
-        results.append(metrics)
-        predictions[name] = preds
+        _add(metrics, preds)
         if name == FINETUNED:
             config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
             joblib.dump(clf, config.MODELS_DIR / "type_clf_e5_finetuned.joblib")
-        log(f"   f1_macro={metrics['f1_macro']:.4f} spearman={metrics['spearman']:.4f} "
-            f"recall@10={metrics['recall_at_10']:.4f}")
+
+        h_metrics, h_preds, h_clf, h_reg = score_hybrid(
+            name + config.HYBRID_SUFFIX, out, lex_fit, lex_test, lex_fit_s, lex_test_s, validation, test
+        )
+        _add(h_metrics, h_preds)
+        if name == FINETUNED:
+            joblib.dump({"classifier": h_clf, "regressor": h_reg},
+                        config.MODELS_DIR / "hybrid_e5_finetuned_lex.joblib")
+
+    log("-> lexical features only")
+    l_metrics, l_preds, _, _ = score_hybrid(
+        config.LEXICAL_METHOD, None, lex_fit, lex_test, lex_fit_s, lex_test_s, validation, test
+    )
+    _add(l_metrics, l_preds)
 
     config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     (config.RESULTS_DIR / "benchmark.json").write_text(

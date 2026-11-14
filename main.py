@@ -90,7 +90,9 @@ def action_finetune() -> None:
     from src.data import load_split
 
     print("Загружаю train (это займёт время)...")
-    train = load_split(config.TRAIN_SPLIT, ["id", "content", "modified_content", "similarity_score"])
+    train = load_split(
+        config.TRAIN_SPLIT, ["id", "content", "modified_content", "similarity_score", "type_duplicate"]
+    )
     out = finetune_encoder(train)
     print(f"Модель сохранена: {out}")
 
@@ -115,7 +117,7 @@ def action_sql_report() -> None:
     from src.sql_queries import QUERIES
     from src.storage import connect, run_query
 
-    method = _ask(f"Метод для запросов (Enter = {config.FINETUNED_METHOD}): ") or config.FINETUNED_METHOD
+    method = _ask(f"Метод для запросов (Enter = {config.HYBRID_METHOD}): ") or config.HYBRID_METHOD
     out_dir = config.RESULTS_DIR / "sql"
     out_dir.mkdir(parents=True, exist_ok=True)
     conn = connect()
@@ -131,22 +133,27 @@ def action_sql_report() -> None:
 
 
 def _classify_pair(text_a: str, text_b: str) -> None:
+    import numpy as np
     import joblib
-    from src.evaluate import FINETUNED
-    from src.model import embed, load_encoder, pair_features
+    from src.lexical import lexical_features
+    from src.model import embed, load_encoder
 
-    clf_path = config.MODELS_DIR / "type_clf_e5_finetuned.joblib"
-    if not config.FINETUNED_MODEL_DIR.exists() or not clf_path.exists():
-        print("Сначала выполните пункт 4 и 5: нужна дообученная модель и классификатор типов.")
+    hybrid_path = config.MODELS_DIR / "hybrid_e5_finetuned_lex.joblib"
+    if not config.FINETUNED_MODEL_DIR.exists() or not hybrid_path.exists():
+        print("Сначала выполните пункты 5 и 6: нужна дообученная модель и гибридный классификатор.")
         return
     model = load_encoder(config.FINETUNED_MODEL_DIR)
-    clf = joblib.load(clf_path)
+    hybrid = joblib.load(hybrid_path)
     ea = embed(model, [text_a])
     eb = embed(model, [text_b])
-    score = float((ea * eb).sum())
-    pred_type = clf.predict(pair_features(ea, eb))[0]
-    print(f"\nМодель: {FINETUNED}")
-    print(f"Оценка схожести (cosine): {score:.4f}")
+    cosine = float((ea * eb).sum())
+    # same feature layout as in training: [cosine, lexical features]
+    features = np.hstack([[[cosine]], lexical_features([text_a], [text_b])])
+    pred_type = hybrid["classifier"].predict(features)[0]
+    pred_score = float(hybrid["regressor"].predict(features)[0])
+    print(f"\nМодель: {config.HYBRID_METHOD}")
+    print(f"Cosine дообученной модели: {cosine:.4f}")
+    print(f"Оценка схожести (гибрид): {pred_score:.3f}")
     print(f"Предсказанный тип дубликата: {pred_type}")
 
 

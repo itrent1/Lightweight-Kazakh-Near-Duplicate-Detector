@@ -54,11 +54,13 @@ A residual check on this split (`results/leakage_report.json`) found 24 test row
 | `tfidf_cosine` (baseline) | Cosine similarity over word 1–2-gram and char_wb 3–5-gram TF-IDF |
 | `minhash_lsh` | Jaccard of MinHash signatures over word 5-gram shingles (datasketch, LSH for retrieval) |
 | `e5_zero_shot` | `intfloat/multilingual-e5-small` embeddings, no training (FAISS for retrieval) |
-| `e5_finetuned` | The same model fine-tuned for 1 epoch on the full group train split with CoSENT regression on `similarity_score` |
+| `e5_finetuned` | The same model fine-tuned for 1 epoch. **v2 (current code):** 512 tokens, CoSENT regression on all types except `partial` plus an in-batch-negative contrastive loss on every non-exact variant. **v1 (results below):** 256 tokens, CoSENT on all types |
+| `<method>+lex` (v2) | Gradient boosting on the method's score plus lexical features (`src/lexical.py`); the regressor also gives the similarity score for Spearman |
+| `lexical_features` (v2) | The lexical features alone, no model, as a reference |
 
-Duplicate-type classification uses logistic regression on the validation split. Embedding methods use features `|u−v|`, `u⊙v` and cosine. Baseline methods use the similarity score alone. A majority-class classifier is included as the simplest baseline.
+Duplicate-type classification uses the validation split. Plain method rows use logistic regression (embedding methods: `|u−v|`, `u⊙v` and cosine; baselines: the similarity score alone). A majority-class classifier is the simplest baseline.
 
-## Results
+## Results (v1, produced before the fixes described below)
 
 Test split: 41,480 pairs (similarity and type). Retrieval: 5,000 random test queries against the non-exact variants of the test documents. A query is relevant to every variant of the same original document.
 
@@ -84,6 +86,38 @@ Observations:
 - The fine-tuned model is best for type classification (macro-F1 0.61) and second for similarity correlation. TF-IDF has the best Spearman (0.50).
 - Fine-tuning lowers Recall@10 (0.99 → 0.76). A likely cause is that low-similarity `partial` variants (score 0.40) are pushed away from the query by the regression objective. This is a hypothesis we did not verify.
 - MinHash is the fastest method and needs no training, but it has the weakest recall among the embedding-free methods.
+
+## Why v1 behaved this way, and what v2 changes
+
+These causes come from the saved v1 predictions and from the text pairs. The v2 code has been written but **not run yet**, so its effect is unmeasured.
+
+1. **The duplicate type is defined by how the text was edited, not by meaning.** Word overlap between a document and its variant, by subtype (400 test pairs each):
+
+   | Subtype | Relation to the original | Word Jaccard | Length ratio |
+   |---|---|---|---|
+   | exact | identical | 1.00 | 1.00 |
+   | ctx (contextual) | same words, different order | 1.00 | 1.00 |
+   | partial_ext | original is fully contained, short tail added | 0.95 | 1.03 |
+   | partial_cut | variant is the first ~70% of the original | 0.72 | 0.71 |
+   | noisy_soft / medium / hard | character-level corruption | 0.91 / 0.77 / 0.61 | 0.99 / 0.98 / 0.95 |
+
+   A semantic embedding hides these cues. After fine-tuning, all types except `partial` have mean cosine 0.95–1.00 (a gap of 0.01–0.03 between types), so a classifier on the cosine cannot separate them well.
+
+2. **The scores are per type and contradict the real overlap.** `partial_ext` shares 95% of its words with the original but is labelled 0.40, below `noisy_hard` (61% overlap, label 0.55). CoSENT regression had to place near-identical texts below corrupted ones, which is why the loss only fell from 5.92 to 5.64. The model's only way out was to push all `partial` pairs down: their mean cosine fell from 0.986 (zero-shot) to 0.724, with a minimum of −0.42. Those variants then dropped out of the retrieval top-10, which explains Recall@10 falling from 0.99 to 0.76. Unrelated documents were not measured directly, so this part is a strong but not fully verified explanation.
+
+3. **The input was truncated.** Measured on 1,500 test documents with the e5 tokenizer: 2.08 tokens per Kazakh word and a median of 333 tokens (165 words). 58.5% of documents were longer than the 256-token limit, which covered only about 123 words. `partial_cut` and `partial_ext` differ at the end of the text, where the model could not see. 36% of `partial` pairs (4,189 of 11,618) were predicted as `exact`.
+
+4. **CoSENT alone has no negatives.** It only orders the cosines of the pairs in a batch and never pushes different originals apart, which retrieval needs.
+
+Changes in v2:
+
+- `src/model.py`: CoSENT regression without `partial` plus `MultipleNegativesRankingLoss` on all non-exact variants (so partial variants are positives). `NO_DUPLICATES` batches stop variants of one original from acting as false negatives for each other.
+- `src/config.py`: `MAX_SEQ_LENGTH` 256 → 512, batch 32 → 16 to fit an 8 GB GPU, 60,000 rows per objective.
+- `src/lexical.py` (new): length ratios, word and trigram containment and Jaccard, common prefix/suffix and "shorter text is a prefix", computed on the full untruncated texts.
+- `src/evaluate.py`: each method also gets a `+lex` hybrid (gradient boosting classifier and regressor), plus a lexical-only reference row.
+- `main.py`: the interactive prediction and the SQL report use the fine-tuned hybrid `e5_finetuned+lex`.
+
+Open risks of v2: training at 512 tokens may need a smaller batch if the GPU runs out of memory (edit `TRAIN_BATCH_SIZE`), and it will take longer than the 33 minutes of v1. 512 tokens cover about 246 words, so 35.1% of documents are still truncated; the lexical features, computed on the full text, cover that gap for classification.
 
 ## Database
 
@@ -135,6 +169,7 @@ src/data.py             chunked CSV -> Parquet, split loading, EDA
 src/splits.py           group-aware train/validation/test split
 src/leakage.py          train-test overlap check (exact and MinHash LSH)
 src/text_utils.py       normalisation and MinHash helpers
+src/lexical.py          length / containment / n-gram / prefix features of a text pair
 src/baseline.py         TF-IDF and MinHash baselines, LSH and sparse top-k retrieval
 src/model.py            e5-small zero-shot and fine-tuning (sentence-transformers), FAISS
 src/evaluate.py         benchmark: metrics, retrieval, classifier, saved predictions
@@ -152,7 +187,7 @@ requirements.txt
 5. File I/O: CSV read in chunks, Parquet, JSON reports, CSV query results, joblib model file, SQLite.
 6. Error handling: `try`/`except` in the menu, with specific messages for missing files and bad data.
 7. Interface: an interactive console menu (`python main.py`).
-8. Modularity: 11 modules in `src/`.
+8. Modularity: 12 modules in `src/`.
 9. Justification: four approaches (TF-IDF, MinHash, zero-shot e5, fine-tuned e5) compared on quality, time and memory.
 10. Database: SQLite with an ER diagram and 10 SQL queries, loaded into pandas.
 11. Data volume: 207,376 rows and a 1.77 GB CSV, read in chunks and stored as Parquet.
@@ -174,8 +209,8 @@ Recommended order:
 2. EDA.
 3. Group-aware split.
 4. Leakage check.
-5. Fine-tune e5-small (about 35 minutes on an RTX 3070; CPU is possible but much slower).
-6. Benchmark all methods and save to SQLite.
+5. Fine-tune e5-small (v1 took about 33 minutes on an RTX 3070; v2 uses 512 tokens and two objectives, so expect longer; CPU is possible but much slower).
+6. Benchmark all methods and save to SQLite (this replaces the v1 results in the database).
 7. SQL report.
 8. Enter two texts to get a similarity score and a predicted duplicate type (needs steps 5 and 6).
 
