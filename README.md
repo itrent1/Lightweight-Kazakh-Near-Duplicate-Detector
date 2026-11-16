@@ -53,14 +53,38 @@ A residual check on this split (`results/leakage_report.json`) found 24 test row
 |---|---|
 | `tfidf_cosine` (baseline) | Cosine similarity over word 1–2-gram and char_wb 3–5-gram TF-IDF |
 | `minhash_lsh` | Jaccard of MinHash signatures over word 5-gram shingles (datasketch, LSH for retrieval) |
-| `e5_zero_shot` | `intfloat/multilingual-e5-small` embeddings, no training (FAISS for retrieval) |
-| `e5_finetuned` | The same model fine-tuned for 1 epoch. **v2 (current code):** 512 tokens, CoSENT regression on all types except `partial` plus an in-batch-negative contrastive loss on every non-exact variant. **v1 (results below):** 256 tokens, CoSENT on all types |
-| `<method>+lex` (v2) | Gradient boosting on the method's score plus lexical features (`src/lexical.py`); the regressor also gives the similarity score for Spearman |
-| `lexical_features` (v2) | The lexical features alone, no model, as a reference |
+| `e5_zero_shot` | `intfloat/multilingual-e5-small` embeddings (117.65M parameters, 470.6 MB fp32), no fine-tuning (FAISS for retrieval) |
+| `e5_finetuned` | The same model fine-tuned for 1 epoch (`MAX_SEQ_LENGTH = 512`, `TRAIN_BATCH_SIZE = 32`): CoSENT regression on all types except `partial` plus `MultipleNegativesRankingLoss` on every non-exact variant |
+| `<method>+lex` | Gradient boosting on the method's features (for encoders: 11 embedding summary stats + out-of-fold class probabilities) plus 30 untruncated lexical features (`src/lexical.py`); the regressor predicts similarity for Spearman |
+| `lexical_features` | The 30 lexical features alone, no neural model, as a fast reference |
 
-Duplicate-type classification uses the validation split. Plain method rows use logistic regression (embedding methods: `|u−v|`, `u⊙v` and cosine; baselines: the similarity score alone). A majority-class classifier is the simplest baseline.
+Duplicate-type classification uses the validation split (`20,744` pairs). Plain embedding methods use an `MLPClassifier(128)` and `Ridge(alpha=5000)` over `|u−v|`, `u−v`, `u⊙v`, and 11 summary features (8 blockwise cosines, L1, L2, cosine); scalar baselines (`tfidf_cosine`, `minhash_lsh`) use logistic regression and their raw similarity score. A majority-class classifier is the simplest baseline.
 
-## Results (v2, current code)
+## Results (v3, current code)
+
+Measured on an RTX 5060 Ti (16 GB) for embeddings (`batch_size=128`, fp16 autocast, deduplicated text encoding) and Ryzen 5 7500F CPU for TF-IDF, MinHash, and gradient boosting. Test split: `41,480` pairs; retrieval: `5,000` test queries.
+
+| Method | Macro-F1 | Accuracy | Spearman | Recall@10 | Sec / 1000 pairs | Size (MB) |
+|---|---|---|---|---|---|---|
+| majority baseline | 0.063 | 0.280 | – | – | 0.00 | – |
+| TF-IDF cosine | 0.366 | 0.404 | 0.496 | **0.999** | 5.61 | 18.4 |
+| TF-IDF cosine + lex | 0.913 | 0.939 | 0.954 | – | 6.49 | 18.4 |
+| MinHash LSH | 0.387 | 0.428 | 0.320 | 0.854 | **0.65** | – |
+| MinHash LSH + lex | 0.914 | **0.939** | 0.955 | – | 1.53 | – |
+| e5-small zero-shot | 0.662 | 0.707 | 0.571 | 0.994 | 1.83 | 470.6 |
+| e5-small zero-shot + lex | **0.914** | 0.939 | 0.955 | – | 2.70 | 470.6 |
+| e5-small fine-tuned | 0.713 | 0.752 | 0.535 | 0.997 | 1.83 | 470.6 |
+| **e5-small fine-tuned + lex** | **0.914** | 0.939 | **0.960** | – | 2.70 | 470.6 |
+| lexical features only | 0.914 | 0.939 | 0.954 | – | 0.88 | – |
+
+What v3 improved over v2:
+- **Plain transformer scoring:** adding directional difference (`u−v`), blockwise cosines/norms, `MLPClassifier(128)`, and `Ridge` regression lifted plain `e5_finetuned` from `0.611` → **`0.752` Accuracy** (`0.585` → **`0.713` Macro-F1**, `0.320` → **`0.535` Spearman**) while keeping **`0.997` Recall@10**; plain `e5_zero_shot` jumped from `0.542` → **`0.707` Accuracy** (`0.499` → **`0.662` Macro-F1**).
+- **Character n-grams & OOF hybrid features:** adding char 4-gram Jaccard/containment, word bigrams, positional word alignment, exact raw/normalized flags, and encoder summary + OOF probabilities pushed `+lex` hybrids to **`0.939` Accuracy**, **`0.914` Macro-F1**, and **`0.960` Spearman** (improving `paraphrase` F1 to `0.795–0.798`).
+- **Inference speedup:** deduplicating repeated texts before TF-IDF, MinHash, and `e5` encoding (plus fp16 autocast on GPU) sped up embedding inference from `12.0–13.1` to **`1.83–2.70` sec / 1000 pairs** (~4.7–6.5× faster).
+- **Irreducible noise ceiling:** `1,214` of `41,480` test pairs (`2.93%`) have identical strings (`content == modified_content`) yet carry non-`exact` labels (`670` `contextual`, `352` `paraphrase`, `99` `noisy_soft`, `93` `partial`), placing a practical ceiling around ~`97.1%` accuracy.
+- **Length effect (SQL query Q9, `e5_finetuned+lex`):** accuracy rises steadily with document length: `0.855` (<100 tokens), `0.942` (100–299), `0.975` (300–599), and `0.993` (600+).
+
+## Results (v2, prior baseline before v3 improvements)
 
 Same test split and retrieval setup as v1. Rows marked `+lex` add lexical features with gradient boosting; their retrieval is the base method's, so Recall is shown only for base rows.
 
@@ -242,6 +266,7 @@ Recommended order:
 ## Limitations
 
 - The official split leaks; all results use our group-aware split instead.
-- Fine-tuning ran for one epoch with a 256-token limit, so longer documents are truncated.
+- Fine-tuning ran for one epoch with a 512-token limit, so the 35.1% of documents longer than 512 tokens are still truncated by the encoder (covered by untruncated lexical features in `+lex`).
 - Length information is available only for a subset of rows, so length analysis covers that subset.
 - Retrieval is evaluated on 5,000 sampled queries, not on the full test split.
+- Precomputed `data/duplicates.db`, `results/sql/*.csv`, and `models/*.joblib` are committed for out-of-the-box SQL reporting (step 7) and interactive prediction (step 8); the 470 MB fine-tuned encoder weights (`models/e5-small-kk-duplicates/`) exceed GitHub's 100 MB file limit, so step 8 falls back to `e5_zero_shot+lex` automatically unless `e5-small-kk-duplicates/` is present locally.

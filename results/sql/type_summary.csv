@@ -1,0 +1,8 @@
+type_duplicate,pairs,avg_score,avg_content_len
+exact,6540,1.0,281.9
+noisy_soft,5185,0.9,
+paraphrase,1272,0.85,285.9
+noisy_medium,5185,0.75,
+contextual,6495,0.7,304.3
+noisy_hard,5185,0.55,
+partial,11618,0.4,297.0

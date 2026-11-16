@@ -1,0 +1,11 @@
+method,f1_macro,spearman,recall_at_10,sec_per_1000_pairs,size_mb,f1_rank
+e5_zero_shot+lex,0.9142,0.9554,,2.697,470.6,1
+e5_finetuned+lex,0.914,0.9597,,2.696,470.6,2
+minhash_lsh+lex,0.9138,0.9548,,1.533,,3
+lexical_features,0.9137,0.9542,,0.88,,4
+tfidf_cosine+lex,0.9133,0.9544,,6.485,18.4,5
+e5_finetuned,0.7131,0.5349,0.9967,1.829,470.6,6
+e5_zero_shot,0.6618,0.5714,0.994,1.829,470.6,7
+minhash_lsh,0.3867,0.3197,0.8539,0.654,,8
+tfidf_cosine,0.3662,0.4956,0.9991,5.607,18.4,9
+majority_baseline,0.0625,,,0.0,,10
