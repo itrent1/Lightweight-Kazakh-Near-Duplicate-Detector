@@ -104,21 +104,47 @@ def finetune_encoder(train_df: pd.DataFrame, out_dir: Path = config.FINETUNED_MO
     return out_dir
 
 
-def embed(model: SentenceTransformer, texts: list[str], batch_size: int = 64) -> np.ndarray:
-    """L2-normalised float32 embeddings."""
-    return model.encode(
-        [config.E5_PREFIX + t for t in texts],
-        batch_size=batch_size,
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-        show_progress_bar=False,
-    ).astype("float32")
+EMBED_SUMMARY_DIM = 11  # 8 blockwise cosines + L1 + L2 + cosine
+
+
+def embed(model: SentenceTransformer, texts: list[str], batch_size: int = 128) -> np.ndarray:
+    """L2-normalised float32 embeddings, deduplicating repeated strings for speed."""
+    if not texts:
+        return np.empty((0, model.get_sentence_embedding_dimension()), dtype="float32")
+    unique_texts = list(dict.fromkeys(texts))
+    idx_map = {t: i for i, t in enumerate(unique_texts)}
+    prefixed = [config.E5_PREFIX + t for t in unique_texts]
+    use_amp = torch.cuda.is_available()
+    with torch.inference_mode(), torch.amp.autocast("cuda", dtype=torch.float16, enabled=use_amp):
+        uniq_emb = model.encode(
+            prefixed,
+            batch_size=batch_size,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        ).astype("float32")
+    indices = np.fromiter((idx_map[t] for t in texts), dtype=np.int64, count=len(texts))
+    return uniq_emb[indices]
 
 
 def pair_features(ea: np.ndarray, eb: np.ndarray) -> np.ndarray:
-    """Classifier features for a pair: |u-v|, u*v and cosine."""
-    cos = (ea * eb).sum(axis=1, keepdims=True)
-    return np.hstack([np.abs(ea - eb), ea * eb, cos])
+    """Classifier features for a pair: |u-v|, u-v, u*v, and 11 compact summary features.
+
+    The final 11 columns are [block_cos_0..7, l1_dist, l2_dist, cosine].
+    """
+    diff = ea - eb
+    abs_diff = np.abs(diff)
+    prod = ea * eb
+    n, d = ea.shape
+    block_dim = d // 8
+    eab = ea[:, : block_dim * 8].reshape(n, 8, block_dim)
+    ebb = eb[:, : block_dim * 8].reshape(n, 8, block_dim)
+    denom = np.linalg.norm(eab, axis=2) * np.linalg.norm(ebb, axis=2) + 1e-8
+    block_cos = (eab * ebb).sum(axis=2) / denom
+    l1 = abs_diff.sum(axis=1, keepdims=True)
+    l2 = np.linalg.norm(diff, axis=1, keepdims=True)
+    cos = prod.sum(axis=1, keepdims=True)
+    return np.hstack([abs_diff, diff, prod, block_cos, l1, l2, cos]).astype("float32")
 
 
 def faiss_topk(query_emb: np.ndarray, corpus_emb: np.ndarray, k_max: int) -> np.ndarray:

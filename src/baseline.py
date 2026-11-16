@@ -11,6 +11,21 @@ from . import config
 from .text_utils import minhash_signature, normalize
 
 
+def _dedup_texts(texts: list[str]) -> tuple[list[str], list[int]]:
+    """Return unique texts and an index list mapping each original position to its unique entry."""
+    unique: list[str] = []
+    idx_map: dict[str, int] = {}
+    indices: list[int] = []
+    for t in texts:
+        idx = idx_map.get(t)
+        if idx is None:
+            idx = len(unique)
+            idx_map[t] = idx
+            unique.append(t)
+        indices.append(idx)
+    return unique, indices
+
+
 class TfidfBaseline:
     """L2-normalised TF-IDF over word 1-2 grams and char_wb 3-5 grams (concatenated)."""
 
@@ -29,9 +44,12 @@ class TfidfBaseline:
         return self
 
     def transform(self, texts: list[str]) -> sp.csr_matrix:
-        clean = [normalize(t) for t in texts]
+        if not texts:
+            return sp.csr_matrix((0, 0), dtype=np.float32)
+        unique, indices = _dedup_texts(texts)
+        clean = [normalize(t) for t in unique]
         X = sp.hstack([self.word_vec.transform(clean), self.char_vec.transform(clean)]).tocsr()
-        return l2_normalize(X)
+        return l2_normalize(X)[indices]
 
 
 def rowwise_dot(A: sp.csr_matrix, B: sp.csr_matrix) -> np.ndarray:
@@ -52,7 +70,11 @@ def sparse_topk(Q: sp.csr_matrix, C: sp.csc_matrix, k_max: int, chunk: int = 500
 
 
 def minhash_signatures(texts: list[str]) -> list:
-    return [minhash_signature(t) for t in texts]
+    if not texts:
+        return []
+    unique, indices = _dedup_texts(texts)
+    sigs = [minhash_signature(t) for t in unique]
+    return [sigs[i] for i in indices]
 
 
 def minhash_pair_scores(sigs_a: list, sigs_b: list) -> np.ndarray:

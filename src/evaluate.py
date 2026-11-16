@@ -20,8 +20,10 @@ import psutil
 from scipy.stats import spearmanr
 from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import accuracy_score, f1_score
+from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -36,7 +38,7 @@ from .baseline import (
 )
 from .data import load_split
 from .lexical import lexical_features
-from .model import embed, faiss_topk, load_encoder, model_size_mb, pair_features
+from .model import EMBED_SUMMARY_DIM, embed, faiss_topk, load_encoder, model_size_mb, pair_features
 
 FINETUNED = config.FINETUNED_METHOD
 COLUMNS = ["id", "base_id", "category", "content", "modified_content", "type_duplicate",
@@ -158,50 +160,151 @@ def recall_at_k(topk: np.ndarray, relevant: list[set[int]], ks=config.TOP_K) -> 
     return metrics
 
 
-def score_output(out: MethodOutput, clf_labels: np.ndarray, test: pd.DataFrame, relevant: list[set[int]]):
-    clf = make_pipeline(StandardScaler(), LogisticRegression(max_iter=3000, class_weight="balanced"))
-    _, clf_s = _timed(lambda: clf.fit(out.X_clf_fit, clf_labels))
-    types = clf.predict(out.X_clf_test)
+def _make_base_clf(is_encoder: bool):
+    if is_encoder:
+        return make_pipeline(
+            StandardScaler(),
+            MLPClassifier(
+                hidden_layer_sizes=(128,),
+                alpha=1.0,
+                max_iter=40,
+                early_stopping=True,
+                random_state=config.RANDOM_STATE,
+            ),
+        )
+    return make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000, class_weight="balanced"))
+
+
+def _oof_encoder_probs(
+    X: np.ndarray, labels: np.ndarray, groups: np.ndarray, n_splits: int = 5
+) -> np.ndarray:
+    """Out-of-fold class probabilities grouped by base_id so validation stays leak-free."""
+    classes = np.unique(labels)
+    probs = np.zeros((len(labels), len(classes)), dtype=np.float32)
+    cv = StratifiedGroupKFold(n_splits=n_splits)
+    for tr_idx, val_idx in cv.split(X, labels, groups):
+        fold_clf = _make_base_clf(is_encoder=True)
+        fold_clf.fit(X[tr_idx], labels[tr_idx])
+        fold_p = fold_clf.predict_proba(X[val_idx])
+        col_idx = np.searchsorted(classes, fold_clf.classes_)
+        probs[val_idx[:, None], col_idx] = fold_p
+    return probs
+
+
+def build_hybrid_features(
+    lex_X: np.ndarray,
+    method_X: np.ndarray | None = None,
+    embed_probs: np.ndarray | None = None,
+) -> np.ndarray:
+    """Combine lexical features with scalar score or encoder summary + class probabilities."""
+    if method_X is None:
+        return lex_X
+    if method_X.shape[1] >= EMBED_SUMMARY_DIM:
+        summary = method_X[:, -EMBED_SUMMARY_DIM:]
+        parts = [summary]
+        if embed_probs is not None:
+            parts.append(embed_probs)
+        parts.append(lex_X)
+        return np.hstack(parts).astype(np.float32)
+    return np.hstack([method_X[:, -1:], lex_X]).astype(np.float32)
+
+
+def score_output(
+    out: MethodOutput, validation: pd.DataFrame, test: pd.DataFrame, relevant: list[set[int]]
+):
+    is_encoder = out.X_clf_fit.shape[1] >= EMBED_SUMMARY_DIM
+    clf_labels = validation["type_duplicate"].values
+    clf = _make_base_clf(is_encoder=is_encoder)
+    reg = make_pipeline(StandardScaler(), Ridge(alpha=5000.0)) if is_encoder else None
+
+    def _fit():
+        clf.fit(out.X_clf_fit, clf_labels)
+        if reg is not None:
+            reg.fit(out.X_clf_fit, validation["similarity_score"].values)
+
+    _, clf_s = _timed(_fit)
+
+    def _predict():
+        pred_types = clf.predict(out.X_clf_test)
+        pred_scores = reg.predict(out.X_clf_test) if reg is not None else out.sims
+        pred_probs = clf.predict_proba(out.X_clf_test) if is_encoder else None
+        return pred_types, pred_scores, pred_probs
+
+    (types, pred_scores, test_probs), pred_s = _timed(_predict)
     y = test["type_duplicate"].values
+    total_infer_s = out.infer_seconds + (pred_s if is_encoder else 0.0)
     metrics = {
         "method": out.name,
         "n_test_pairs": int(len(test)),
-        "spearman": float(spearmanr(out.sims, test["similarity_score"]).correlation),
+        "spearman": float(spearmanr(pred_scores, test["similarity_score"]).correlation),
         "f1_macro": float(f1_score(y, types, average="macro")),
         "accuracy": float(accuracy_score(y, types)),
         **recall_at_k(out.topk, relevant),
         "fit_seconds": round(out.fit_seconds + clf_s, 2),
-        "infer_seconds": round(out.infer_seconds, 2),
-        "infer_seconds_per_1000": round(out.infer_seconds / len(test) * 1000, 3),
+        "infer_seconds": round(total_infer_s, 2),
+        "infer_seconds_per_1000": round(total_infer_s / len(test) * 1000, 3),
         "model_size_mb": None if out.model_size_mb is None else round(out.model_size_mb, 2),
         "rss_mb": round(psutil.Process().memory_info().rss / 1e6, 1),
     }
-    preds = pd.DataFrame({"pair_id": test["id"].values, "pred_score": out.sims, "pred_type": types})
-    return metrics, preds, clf
+    preds = pd.DataFrame({"pair_id": test["id"].values, "pred_score": pred_scores, "pred_type": types})
+    return metrics, preds, clf, test_probs
 
 
-def score_hybrid(name: str, out: MethodOutput | None, lex_fit: np.ndarray, lex_test: np.ndarray,
-                 lex_fit_seconds: float, lex_test_seconds: float,
-                 validation: pd.DataFrame, test: pd.DataFrame):
-    """Gradient boosting on [method score, lexical features]; out=None gives the lexical-only variant.
+def score_hybrid(
+    name: str,
+    out: MethodOutput | None,
+    lex_fit: np.ndarray,
+    lex_test: np.ndarray,
+    lex_fit_seconds: float,
+    lex_test_seconds: float,
+    validation: pd.DataFrame,
+    test: pd.DataFrame,
+    test_probs: np.ndarray | None = None,
+):
+    """Gradient boosting on [method features, lexical features]; out=None gives lexical-only.
 
-    The method score is the last feature column of every method (the only column for TF-IDF and
-    MinHash, the cosine for the encoders), so the 768 embedding dimensions are not repeated here.
-    The regressor predicts similarity_score and supplies the Spearman of the hybrid.
+    For encoder methods, uses all 11 summary embedding columns plus out-of-fold class
+    probabilities from the encoder classifier alongside the lexical features.
     """
+    oof_s = 0.0
     if out is None:
-        X_fit, X_test = lex_fit, lex_test
+        X_fit = build_hybrid_features(lex_fit)
+        X_test = build_hybrid_features(lex_test)
         base_fit_s = base_infer_s = 0.0
         size = None
     else:
-        X_fit = np.hstack([out.X_clf_fit[:, -1:], lex_fit])
-        X_test = np.hstack([out.X_clf_test[:, -1:], lex_test])
+        is_encoder = out.X_clf_fit.shape[1] >= EMBED_SUMMARY_DIM
+        if is_encoder:
+            oof_probs, oof_s = _timed(
+                lambda: _oof_encoder_probs(
+                    out.X_clf_fit,
+                    validation["type_duplicate"].values,
+                    validation["base_id"].values,
+                )
+            )
+            X_fit = build_hybrid_features(lex_fit, out.X_clf_fit, oof_probs)
+            X_test = build_hybrid_features(lex_test, out.X_clf_test, test_probs)
+        else:
+            X_fit = build_hybrid_features(lex_fit, out.X_clf_fit)
+            X_test = build_hybrid_features(lex_test, out.X_clf_test)
         base_fit_s, base_infer_s, size = out.fit_seconds, out.infer_seconds, out.model_size_mb
 
     clf = HistGradientBoostingClassifier(
-        max_iter=300, learning_rate=0.1, class_weight="balanced", random_state=config.RANDOM_STATE
+        max_iter=350,
+        learning_rate=0.06,
+        max_leaf_nodes=45,
+        min_samples_leaf=20,
+        l2_regularization=0.5,
+        random_state=config.RANDOM_STATE,
     )
-    reg = HistGradientBoostingRegressor(max_iter=300, learning_rate=0.1, random_state=config.RANDOM_STATE)
+    reg = HistGradientBoostingRegressor(
+        max_iter=350,
+        learning_rate=0.06,
+        max_leaf_nodes=45,
+        min_samples_leaf=20,
+        l2_regularization=0.5,
+        random_state=config.RANDOM_STATE,
+    )
 
     def _fit():
         clf.fit(X_fit, validation["type_duplicate"].values)
@@ -220,7 +323,7 @@ def score_hybrid(name: str, out: MethodOutput | None, lex_fit: np.ndarray, lex_t
         "accuracy": float(accuracy_score(y, types)),
         "recall_at_1": None, "recall_at_5": None, "recall_at_10": None,  # retrieval is unchanged, see base row
         "hit_at_1": None, "hit_at_5": None, "hit_at_10": None,
-        "fit_seconds": round(base_fit_s + lex_fit_seconds + fit_s, 2),
+        "fit_seconds": round(base_fit_s + lex_fit_seconds + oof_s + fit_s, 2),
         "infer_seconds": round(infer_s, 2),
         "infer_seconds_per_1000": round(infer_s / len(test) * 1000, 3),
         "model_size_mb": None if size is None else round(size, 2),
@@ -299,19 +402,29 @@ def run_benchmark(include_finetuned: bool = True, log=print) -> dict:
     for name, runner in runs:
         log(f"-> {name}")
         out = runner()
-        metrics, preds, clf = score_output(out, clf_labels, test, relevant)
+        metrics, preds, clf, test_probs = score_output(out, validation, test, relevant)
         _add(metrics, preds)
-        if name == FINETUNED:
+        if name in (FINETUNED, "e5_zero_shot"):
             config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
-            joblib.dump(clf, config.MODELS_DIR / "type_clf_e5_finetuned.joblib")
+            joblib.dump(clf, config.MODELS_DIR / f"type_clf_{name}.joblib")
 
         h_metrics, h_preds, h_clf, h_reg = score_hybrid(
-            name + config.HYBRID_SUFFIX, out, lex_fit, lex_test, lex_fit_s, lex_test_s, validation, test
+            name + config.HYBRID_SUFFIX,
+            out,
+            lex_fit,
+            lex_test,
+            lex_fit_s,
+            lex_test_s,
+            validation,
+            test,
+            test_probs=test_probs,
         )
         _add(h_metrics, h_preds)
-        if name == FINETUNED:
-            joblib.dump({"classifier": h_clf, "regressor": h_reg},
-                        config.MODELS_DIR / "hybrid_e5_finetuned_lex.joblib")
+        if name in (FINETUNED, "e5_zero_shot"):
+            joblib.dump(
+                {"classifier": h_clf, "regressor": h_reg, "embed_clf": clf},
+                config.MODELS_DIR / f"hybrid_{name}_lex.joblib",
+            )
 
     log("-> lexical features only")
     l_metrics, l_preds, _, _ = score_hybrid(

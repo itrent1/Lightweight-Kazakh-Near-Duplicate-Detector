@@ -113,15 +113,27 @@ def action_benchmark() -> None:
     print(pd.DataFrame(bench["results"]).round(4).to_string(index=False))
 
 
+def _default_report_method(conn) -> str:
+    row = conn.execute(
+        "SELECT method FROM experiments WHERE method = ? LIMIT 1", (config.HYBRID_METHOD,)
+    ).fetchone()
+    if row:
+        return config.HYBRID_METHOD
+    fallback = "e5_zero_shot" + config.HYBRID_SUFFIX
+    row = conn.execute("SELECT method FROM experiments WHERE method = ? LIMIT 1", (fallback,)).fetchone()
+    return fallback if row else config.HYBRID_METHOD
+
+
 def action_sql_report() -> None:
     from src.sql_queries import QUERIES
     from src.storage import connect, run_query
 
-    method = _ask(f"Метод для запросов (Enter = {config.HYBRID_METHOD}): ") or config.HYBRID_METHOD
     out_dir = config.RESULTS_DIR / "sql"
     out_dir.mkdir(parents=True, exist_ok=True)
     conn = connect()
     try:
+        default_method = _default_report_method(conn)
+        method = _ask(f"Метод для запросов (Enter = {default_method}): ") or default_method
         for name, spec in QUERIES.items():
             df = run_query(conn, name, method=method)
             df.to_csv(out_dir / f"{name}.csv", index=False, encoding="utf-8")
@@ -132,27 +144,40 @@ def action_sql_report() -> None:
     print(f"\nCSV-файлы: {out_dir}")
 
 
-def _classify_pair(text_a: str, text_b: str) -> None:
-    import numpy as np
-    import joblib
-    from src.lexical import lexical_features
-    from src.model import embed, load_encoder
+def _resolve_predict_artifacts() -> tuple[str, str | Path, Path] | None:
+    finetuned_hybrid = config.MODELS_DIR / "hybrid_e5_finetuned_lex.joblib"
+    if config.FINETUNED_MODEL_DIR.exists() and finetuned_hybrid.exists():
+        return config.HYBRID_METHOD, config.FINETUNED_MODEL_DIR, finetuned_hybrid
+    zeroshot_hybrid = config.MODELS_DIR / "hybrid_e5_zero_shot_lex.joblib"
+    if zeroshot_hybrid.exists():
+        return "e5_zero_shot" + config.HYBRID_SUFFIX, config.BASE_MODEL_NAME, zeroshot_hybrid
+    return None
 
-    hybrid_path = config.MODELS_DIR / "hybrid_e5_finetuned_lex.joblib"
-    if not config.FINETUNED_MODEL_DIR.exists() or not hybrid_path.exists():
-        print("Сначала выполните пункты 5 и 6: нужна дообученная модель и гибридный классификатор.")
+
+def _classify_pair(text_a: str, text_b: str) -> None:
+    import joblib
+    from src.evaluate import build_hybrid_features
+    from src.lexical import lexical_features
+    from src.model import embed, load_encoder, pair_features
+
+    resolved = _resolve_predict_artifacts()
+    if resolved is None:
+        print("Сначала выполните пункт 6 (бенчмарк) — нужен обученный гибридный классификатор.")
         return
-    model = load_encoder(config.FINETUNED_MODEL_DIR)
+    method_name, model_path, hybrid_path = resolved
+    model = load_encoder(model_path)
     hybrid = joblib.load(hybrid_path)
     ea = embed(model, [text_a])
     eb = embed(model, [text_b])
-    cosine = float((ea * eb).sum())
-    # same feature layout as in training: [cosine, lexical features]
-    features = np.hstack([[[cosine]], lexical_features([text_a], [text_b])])
+    pair_x = pair_features(ea, eb)
+    cosine = float(pair_x[0, -1])
+    embed_probs = hybrid["embed_clf"].predict_proba(pair_x) if "embed_clf" in hybrid else None
+    lex_x = lexical_features([text_a], [text_b])
+    features = build_hybrid_features(lex_x, pair_x, embed_probs)
     pred_type = hybrid["classifier"].predict(features)[0]
     pred_score = float(hybrid["regressor"].predict(features)[0])
-    print(f"\nМодель: {config.HYBRID_METHOD}")
-    print(f"Cosine дообученной модели: {cosine:.4f}")
+    print(f"\nМодель: {method_name}")
+    print(f"Cosine модели: {cosine:.4f}")
     print(f"Оценка схожести (гибрид): {pred_score:.3f}")
     print(f"Предсказанный тип дубликата: {pred_type}")
 
