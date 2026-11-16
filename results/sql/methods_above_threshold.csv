@@ -1,0 +1,10 @@
+method,pairs,accuracy
+tfidf_cosine+lex,41480,0.939
+minhash_lsh+lex,41480,0.939
+lexical_features,41480,0.939
+e5_zero_shot+lex,41480,0.939
+e5_finetuned+lex,41480,0.939
+e5_finetuned,41480,0.752
+e5_zero_shot,41480,0.707
+minhash_lsh,41480,0.428
+tfidf_cosine,41480,0.404

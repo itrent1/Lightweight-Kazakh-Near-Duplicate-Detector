@@ -1,0 +1,8 @@
+type_duplicate,pairs,share_pct,size_rank
+partial,11618,28.01,1
+exact,6540,15.77,2
+contextual,6495,15.66,3
+noisy_soft,5185,12.5,4
+noisy_medium,5185,12.5,4
+noisy_hard,5185,12.5,4
+paraphrase,1272,3.07,7

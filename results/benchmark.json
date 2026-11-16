@@ -29,11 +29,11 @@
     "hit_at_5": 1.0,
     "recall_at_10": 0.9990904761904762,
     "hit_at_10": 1.0,
-    "fit_seconds": 140.85,
-    "infer_seconds": 246.11,
-    "infer_seconds_per_1000": 5.933,
+    "fit_seconds": 143.96,
+    "infer_seconds": 232.59,
+    "infer_seconds_per_1000": 5.607,
     "model_size_mb": 18.37,
-    "rss_mb": 3592.8
+    "rss_mb": 6239.2
   },
   {
     "method": "tfidf_cosine+lex",
@@ -47,11 +47,11 @@
     "hit_at_1": null,
     "hit_at_5": null,
     "hit_at_10": null,
-    "fit_seconds": 159.22,
-    "infer_seconds": 280.88,
-    "infer_seconds_per_1000": 6.771,
+    "fit_seconds": 164.11,
+    "infer_seconds": 269.0,
+    "infer_seconds_per_1000": 6.485,
     "model_size_mb": 18.37,
-    "rss_mb": 3615.6
+    "rss_mb": 6265.1
   },
   {
     "method": "minhash_lsh",
@@ -65,11 +65,11 @@
     "hit_at_5": 1.0,
     "recall_at_10": 0.8538904761904762,
     "hit_at_10": 1.0,
-    "fit_seconds": 13.35,
-    "infer_seconds": 28.18,
-    "infer_seconds_per_1000": 0.679,
+    "fit_seconds": 12.78,
+    "infer_seconds": 27.13,
+    "infer_seconds_per_1000": 0.654,
     "model_size_mb": null,
-    "rss_mb": 3501.3
+    "rss_mb": 6144.7
   },
   {
     "method": "minhash_lsh+lex",
@@ -83,11 +83,11 @@
     "hit_at_1": null,
     "hit_at_5": null,
     "hit_at_10": null,
-    "fit_seconds": 31.88,
-    "infer_seconds": 62.96,
-    "infer_seconds_per_1000": 1.518,
+    "fit_seconds": 33.2,
+    "infer_seconds": 63.57,
+    "infer_seconds_per_1000": 1.533,
     "model_size_mb": null,
-    "rss_mb": 3524.9
+    "rss_mb": 6170.2
   },
   {
     "method": "e5_zero_shot",
@@ -101,11 +101,11 @@
     "hit_at_5": 1.0,
     "recall_at_10": 0.9940428571428572,
     "hit_at_10": 1.0,
-    "fit_seconds": 52.47,
-    "infer_seconds": 78.0,
-    "infer_seconds_per_1000": 1.881,
+    "fit_seconds": 54.75,
+    "infer_seconds": 75.86,
+    "infer_seconds_per_1000": 1.829,
     "model_size_mb": 470.62,
-    "rss_mb": 5172.3
+    "rss_mb": 6953.8
   },
   {
     "method": "e5_zero_shot+lex",
@@ -119,11 +119,47 @@
     "hit_at_1": null,
     "hit_at_5": null,
     "hit_at_10": null,
-    "fit_seconds": 94.02,
-    "infer_seconds": 112.34,
-    "infer_seconds_per_1000": 2.708,
+    "fit_seconds": 100.56,
+    "infer_seconds": 111.85,
+    "infer_seconds_per_1000": 2.697,
     "model_size_mb": 470.62,
-    "rss_mb": 5213.7
+    "rss_mb": 6988.9
+  },
+  {
+    "method": "e5_finetuned",
+    "n_test_pairs": 41480,
+    "spearman": 0.534919929447482,
+    "f1_macro": 0.7131418923428797,
+    "accuracy": 0.7515911282545805,
+    "recall_at_1": 0.1491333333333333,
+    "hit_at_1": 1.0,
+    "recall_at_5": 0.7454380952380952,
+    "hit_at_5": 1.0,
+    "recall_at_10": 0.9966571428571428,
+    "hit_at_10": 1.0,
+    "fit_seconds": 46.44,
+    "infer_seconds": 75.88,
+    "infer_seconds_per_1000": 1.829,
+    "model_size_mb": 470.62,
+    "rss_mb": 6990.7
+  },
+  {
+    "method": "e5_finetuned+lex",
+    "n_test_pairs": 41480,
+    "spearman": 0.9597483209083387,
+    "f1_macro": 0.9139716785252966,
+    "accuracy": 0.9388862102217936,
+    "recall_at_1": null,
+    "recall_at_5": null,
+    "recall_at_10": null,
+    "hit_at_1": null,
+    "hit_at_5": null,
+    "hit_at_10": null,
+    "fit_seconds": 100.05,
+    "infer_seconds": 111.84,
+    "infer_seconds_per_1000": 2.696,
+    "model_size_mb": 470.62,
+    "rss_mb": 7025.4
   },
   {
     "method": "lexical_features",
@@ -137,10 +173,10 @@
     "hit_at_1": null,
     "hit_at_5": null,
     "hit_at_10": null,
-    "fit_seconds": 19.76,
-    "infer_seconds": 34.84,
-    "infer_seconds_per_1000": 0.84,
+    "fit_seconds": 22.68,
+    "infer_seconds": 36.51,
+    "infer_seconds_per_1000": 0.88,
     "model_size_mb": null,
-    "rss_mb": 5208.8
+    "rss_mb": 7021.3
   }
 ]

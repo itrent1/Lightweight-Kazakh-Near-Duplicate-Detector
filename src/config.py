@@ -29,7 +29,7 @@ CSV_CHUNKSIZE = 20_000
 # so partial_cut / partial_ext differences at the end of the text were invisible.
 # 512 is the model maximum (still truncates 35.1%); the batch is halved to fit an 8 GB GPU.
 MAX_SEQ_LENGTH = 512
-TRAIN_BATCH_SIZE = 16
+TRAIN_BATCH_SIZE = 32
 LEARNING_RATE = 2e-5
 # Two objectives are mixed (see src/model.py): CoSENT regression and in-batch-negative contrastive.
 TRAIN_ROWS_PER_OBJECTIVE = 60_000
